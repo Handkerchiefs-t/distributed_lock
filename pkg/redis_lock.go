@@ -18,6 +18,10 @@ type Client struct {
 	r redis.Cmdable
 }
 
+func NewClient(r redis.Cmdable) *Client {
+	return &Client{r: r}
+}
+
 func (c *Client) TryLock(ctx context.Context, key string, expiration time.Duration) (*Lock, error) {
 	uuid := uuid.New().String()
 	ok, err := c.r.SetNX(ctx, key, uuid, expiration).Result()
@@ -31,18 +35,18 @@ func (c *Client) TryLock(ctx context.Context, key string, expiration time.Durati
 	return &Lock{
 		client: c,
 		key:    key,
-		uuid:   uuid,
+		val:    uuid,
 	}, nil
 }
 
 type Lock struct {
 	client *Client
 	key    string
-	uuid   string
+	val    string
 }
 
 func (l *Lock) Unlock(ctx context.Context) error {
-	res, err := l.client.r.Eval(ctx, luaUnlock, []string{l.key}, l.uuid).Int64()
+	res, err := l.client.r.Eval(ctx, luaUnlock, []string{l.key}, l.val).Int64()
 	if errors.Is(err, redis.Nil) {
 		return ErrLockNotHold
 	}
