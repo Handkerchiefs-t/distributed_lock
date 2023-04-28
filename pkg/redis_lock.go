@@ -12,6 +12,8 @@ import (
 var (
 	//go:embed lua/unlock.lua
 	luaUnlock string
+	//go:embed lua/refresh.lua
+	luaRefresh string
 )
 
 type Client struct {
@@ -33,20 +35,36 @@ func (c *Client) TryLock(ctx context.Context, key string, expiration time.Durati
 	}
 
 	return &Lock{
-		client: c,
-		key:    key,
-		val:    uuid,
+		client:     c,
+		key:        key,
+		val:        uuid,
+		expiration: expiration,
 	}, nil
 }
 
 type Lock struct {
-	client *Client
-	key    string
-	val    string
+	client     *Client
+	key        string
+	val        string
+	expiration time.Duration
 }
 
 func (l *Lock) Unlock(ctx context.Context) error {
 	res, err := l.client.r.Eval(ctx, luaUnlock, []string{l.key}, l.val).Int64()
+	if errors.Is(err, redis.Nil) {
+		return ErrLockNotHold
+	}
+	if err != nil {
+		return err
+	}
+	if res != 1 {
+		return ErrLockNotHold
+	}
+	return nil
+}
+
+func (l *Lock) Refresh(ctx context.Context) error {
+	res, err := l.client.r.Eval(ctx, luaRefresh, []string{l.key}, l.val, l.expiration.Seconds()).Int64()
 	if errors.Is(err, redis.Nil) {
 		return ErrLockNotHold
 	}

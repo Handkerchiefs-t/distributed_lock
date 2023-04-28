@@ -49,8 +49,9 @@ func TestClient_e2e_TryLock(t *testing.T) {
 
 			wantErr: nil,
 			wantLock: &Lock{
-				client: client,
-				key:    "key1",
+				client:     client,
+				key:        "key1",
+				expiration: time.Minute,
 			},
 		},
 		{
@@ -108,6 +109,7 @@ func TestClient_e2e_TryLock(t *testing.T) {
 				return
 			}
 			assert.Equal(t, tc.wantLock.key, lock.key)
+			assert.Equal(t, tc.wantLock.expiration, lock.expiration)
 			assert.NotEmpty(t, lock.val)
 			assert.NotNil(t, lock.client)
 		})
@@ -216,6 +218,117 @@ func TestLock_e2e_UnLock(t *testing.T) {
 				val:    ts.val,
 			}
 			err := lock.Unlock(ts.ctx())
+			assert.Equal(t, ts.wantErr, err)
+		})
+	}
+}
+
+func TestLock_e2e_Refresh(t *testing.T) {
+	rdb := redis.NewClient(&redis.Options{
+		Addr: "localhost:6379",
+	})
+	client := NewClient(rdb)
+
+	testCases := []struct {
+		name string
+
+		ctx    func() context.Context
+		before func(t *testing.T)
+		after  func(t *testing.T)
+
+		key        string
+		val        string
+		expiration time.Duration
+
+		wantErr error
+	}{
+		{
+			name: "refresh success",
+
+			ctx: func() context.Context { return context.Background() },
+			before: func(t *testing.T) {
+				rsp, err := rdb.Set(context.Background(), "refresh_key1", "value1", time.Second*10).Result()
+				t.Logf("before: %s", rsp)
+				assert.NoError(t, err)
+				assert.NotEmpty(t, rsp)
+			},
+			after: func(t *testing.T) {
+				result, err := rdb.TTL(context.Background(), "refresh_key1").Result()
+				assert.NoError(t, err)
+				assert.True(t, result > time.Second*10)
+				t.Logf("refresh success after: %s", result)
+			},
+
+			key:        "refresh_key1",
+			val:        "value1",
+			expiration: time.Minute,
+
+			wantErr: nil,
+		},
+		{
+			name: "not hold lock",
+
+			ctx:    func() context.Context { return context.Background() },
+			before: func(t *testing.T) {},
+			after:  func(t *testing.T) {},
+
+			key: "key2",
+			val: "value2",
+
+			wantErr: ErrLockNotHold,
+		},
+		{
+			name: "hold by other",
+
+			ctx: func() context.Context { return context.Background() },
+			before: func(t *testing.T) {
+				rsp, err := rdb.Set(context.Background(), "key3", "value3", time.Minute).Result()
+				t.Logf("before: %s", rsp)
+				assert.NoError(t, err)
+				assert.NotEmpty(t, rsp)
+			},
+			after: func(t *testing.T) {
+				val, err := rdb.Get(context.Background(), "key3").Result()
+				t.Logf("after: %s", val)
+				assert.NoError(t, err)
+				assert.NotEmpty(t, val)
+			},
+
+			key: "key3",
+			val: "value3_not_hold",
+
+			wantErr: ErrLockNotHold,
+		},
+		{
+			name: "error",
+
+			ctx: func() context.Context {
+				res, cancel := context.WithTimeout(context.Background(), time.Second*3)
+				cancel()
+				return res
+			},
+			before: func(t *testing.T) {},
+			after:  func(t *testing.T) {},
+
+			key: "key4",
+			val: "value4",
+
+			wantErr: context.Canceled,
+		},
+	}
+
+	for _, ts := range testCases {
+		t.Run(ts.name, func(t *testing.T) {
+			ts.before(t)
+			defer ts.after(t)
+
+			lock := &Lock{
+				client:     client,
+				key:        ts.key,
+				val:        ts.val,
+				expiration: ts.expiration,
+			}
+			err := lock.Refresh(ts.ctx())
 			assert.Equal(t, ts.wantErr, err)
 		})
 	}
