@@ -47,6 +47,7 @@ type Lock struct {
 	key        string
 	val        string
 	expiration time.Duration
+	unlockChan chan struct{}
 }
 
 func (l *Lock) Unlock(ctx context.Context) error {
@@ -60,6 +61,7 @@ func (l *Lock) Unlock(ctx context.Context) error {
 	if res != 1 {
 		return ErrLockNotHold
 	}
+	close(l.unlockChan)
 	return nil
 }
 
@@ -75,4 +77,27 @@ func (l *Lock) Refresh(ctx context.Context) error {
 		return ErrLockNotHold
 	}
 	return nil
+}
+
+// AutoRefresh
+// @param interval is the interval between two refresh
+// @param timeout is the timeout of refresh
+// @return error when AutoRefresh is stopped
+func (l *Lock) AutoRefresh(ctx context.Context, interval time.Duration, timeout time.Duration) error {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			childCtx, _ := context.WithTimeout(ctx, timeout)
+			if err := l.Refresh(childCtx); err != nil {
+				return err
+			}
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-l.unlockChan:
+			return nil
+		}
+	}
 }

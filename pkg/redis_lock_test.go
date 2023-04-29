@@ -243,5 +243,11 @@ func TestLock_Refresh(t *testing.T) {
 			assert.Equal(t, tc.wantErr, err)
 		})
 	}
+}
 
+func ExampleLock_AutoRefresh() {
+	var l *Lock
+	go func() {
+		l.AutoRefresh(context.Background(), time.Second*10, time.Second*30)
+	}()
 }
