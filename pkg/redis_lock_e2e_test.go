@@ -10,6 +10,158 @@ import (
 	"time"
 )
 
+func TestClient_e2e_Lock(t *testing.T) {
+	rdb := redis.NewClient(&redis.Options{
+		Addr: "localhost:6379",
+		DB:   0,
+	})
+	vals := []string{}
+
+	testCases := []struct {
+		name string
+
+		key        string
+		val        string
+		expiration time.Duration
+		timeout    time.Duration
+
+		ctx    func() context.Context
+		before func(t *testing.T)
+		after  func(t *testing.T)
+
+		wantErr error
+	}{
+		{
+			name: "lock success",
+
+			key:        "key1",
+			val:        "value1",
+			expiration: time.Minute,
+			timeout:    time.Minute,
+
+			ctx:    func() context.Context { return context.Background() },
+			before: func(t *testing.T) {},
+			after: func(t *testing.T) {
+				ttl, err := rdb.TTL(context.Background(), "key1").Result()
+				assert.NoError(t, err)
+				assert.True(t, ttl.Seconds() >= 50)
+				val, err := rdb.GetDel(context.Background(), "key1").Result()
+				assert.NoError(t, err)
+				assert.Equal(t, "value1", val)
+			},
+		},
+		{
+			name: "not get lock",
+
+			key:        "key2",
+			val:        "value2",
+			expiration: time.Minute,
+			timeout:    time.Minute,
+
+			ctx: func() context.Context { return context.Background() },
+			before: func(t *testing.T) {
+				resp, err := rdb.Set(context.Background(), "key2", "other value", time.Minute).Result()
+				assert.NoError(t, err)
+				assert.Equal(t, "OK", resp)
+			},
+			after: func(t *testing.T) {
+				val, err := rdb.GetDel(context.Background(), "key2").Result()
+				assert.NoError(t, err)
+				assert.Equal(t, "other value", val)
+			},
+
+			wantErr: ErrFailedToGetLock,
+		},
+		{
+			name: "acquiring lock after retrying",
+
+			key:        "key3",
+			val:        "value3",
+			expiration: time.Minute,
+			timeout:    time.Minute,
+
+			ctx: func() context.Context { return context.Background() },
+			before: func(t *testing.T) {
+				resp, err := rdb.Set(context.Background(), "key3", "other value", time.Second*2).Result()
+				assert.NoError(t, err)
+				assert.Equal(t, "OK", resp)
+			},
+			after: func(t *testing.T) {
+				ttl, err := rdb.TTL(context.Background(), "key3").Result()
+				assert.NoError(t, err)
+				assert.True(t, ttl.Seconds() >= 58)
+				val, err := rdb.GetDel(context.Background(), "key3").Result()
+				assert.NoError(t, err)
+				assert.Equal(t, "value3", val)
+			},
+		},
+		{
+			name: "context timeout",
+
+			key:        "key4",
+			val:        "value4",
+			expiration: time.Minute,
+			timeout:    time.Minute,
+
+			ctx: func() context.Context {
+				res, _ := context.WithTimeout(context.Background(), time.Second)
+				time.Sleep(time.Second * 2)
+				return res
+			},
+			before: func(t *testing.T) {},
+			after:  func(t *testing.T) {},
+
+			wantErr: context.DeadlineExceeded,
+		},
+		{
+			name: "context cancel",
+
+			key:        "key5",
+			val:        "value5",
+			expiration: time.Minute,
+			timeout:    time.Minute,
+
+			ctx: func() context.Context {
+				res, cancel := context.WithTimeout(context.Background(), time.Second)
+				cancel()
+				return res
+			},
+			before: func(t *testing.T) {},
+			after:  func(t *testing.T) {},
+
+			wantErr: context.Canceled,
+		},
+	}
+
+	for _, tt := range testCases {
+		vals = append(vals, tt.val)
+	}
+	genVal := func() string {
+		res := vals[0]
+		vals = vals[1:]
+		return res
+	}
+	client := NewClient(rdb, UseGenValueFunc(genVal))
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.before(t)
+			defer tc.after(t)
+			_, err := client.Lock(
+				tc.ctx(),
+				tc.key,
+				tc.expiration,
+				tc.timeout,
+				&FixedRetryStrategy{
+					MaxCount: 3,
+					Interval: time.Second,
+				},
+			)
+			assert.Equal(t, tc.wantErr, err)
+		})
+	}
+}
+
 func TestClient_e2e_TryLock(t *testing.T) {
 	rdb := redis.NewClient(&redis.Options{
 		Addr: "localhost:6379",
@@ -49,7 +201,7 @@ func TestClient_e2e_TryLock(t *testing.T) {
 
 			wantErr: nil,
 			wantLock: &Lock{
-				client:     client,
+				rdb:        client.r,
 				key:        "key1",
 				expiration: time.Minute,
 			},
@@ -111,7 +263,7 @@ func TestClient_e2e_TryLock(t *testing.T) {
 			assert.Equal(t, tc.wantLock.key, lock.key)
 			assert.Equal(t, tc.wantLock.expiration, lock.expiration)
 			assert.NotEmpty(t, lock.val)
-			assert.NotNil(t, lock.client)
+			assert.NotNil(t, lock.rdb)
 		})
 	}
 }
@@ -213,9 +365,9 @@ func TestLock_e2e_UnLock(t *testing.T) {
 			defer ts.after(t)
 
 			lock := &Lock{
-				client: client,
-				key:    ts.key,
-				val:    ts.val,
+				rdb: client.r,
+				key: ts.key,
+				val: ts.val,
 			}
 			err := lock.Unlock(ts.ctx())
 			assert.Equal(t, ts.wantErr, err)
@@ -323,7 +475,7 @@ func TestLock_e2e_Refresh(t *testing.T) {
 			defer ts.after(t)
 
 			lock := &Lock{
-				client:     client,
+				rdb:        client.r,
 				key:        ts.key,
 				val:        ts.val,
 				expiration: ts.expiration,

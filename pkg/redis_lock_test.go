@@ -102,9 +102,9 @@ func TestLock_Unlock(t *testing.T) {
 					Eval(context.Background(), luaUnlock, []string{"key"}, []any{"uuid"}).
 					Return(resp)
 				return &Lock{
-					client: NewClient(cmd),
-					key:    "key",
-					val:    "uuid",
+					rdb: cmd,
+					key: "key",
+					val: "uuid",
 				}
 			},
 
@@ -122,9 +122,9 @@ func TestLock_Unlock(t *testing.T) {
 					Eval(context.Background(), luaUnlock, []string{"key"}, []any{"uuid"}).
 					Return(resp)
 				return &Lock{
-					client: NewClient(cmd),
-					key:    "key",
-					val:    "uuid",
+					rdb: cmd,
+					key: "key",
+					val: "uuid",
 				}
 			},
 
@@ -141,9 +141,9 @@ func TestLock_Unlock(t *testing.T) {
 					Eval(context.Background(), luaUnlock, []string{"key"}, []any{"uuid"}).
 					Return(resp)
 				return &Lock{
-					client: NewClient(cmd),
-					key:    "key",
-					val:    "uuid",
+					rdb: cmd,
+					key: "key",
+					val: "uuid",
 				}
 			},
 
@@ -182,7 +182,7 @@ func TestLock_Refresh(t *testing.T) {
 					Eval(context.Background(), luaRefresh, []string{"key"}, []any{"uuid", float64(60)}).
 					Return(resp)
 				return &Lock{
-					client:     NewClient(cmd),
+					rdb:        cmd,
 					key:        "key",
 					val:        "uuid",
 					expiration: time.Minute,
@@ -203,7 +203,7 @@ func TestLock_Refresh(t *testing.T) {
 					Eval(context.Background(), luaRefresh, []string{"key"}, []any{"uuid", float64(60)}).
 					Return(resp)
 				return &Lock{
-					client:     NewClient(cmd),
+					rdb:        cmd,
 					key:        "key",
 					val:        "uuid",
 					expiration: time.Minute,
@@ -223,7 +223,7 @@ func TestLock_Refresh(t *testing.T) {
 					Eval(context.Background(), luaRefresh, []string{"key"}, []any{"uuid", float64(60)}).
 					Return(resp)
 				return &Lock{
-					client:     NewClient(cmd),
+					rdb:        cmd,
 					key:        "key",
 					val:        "uuid",
 					expiration: time.Minute,

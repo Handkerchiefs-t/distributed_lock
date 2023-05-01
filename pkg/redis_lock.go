@@ -14,19 +14,32 @@ var (
 	luaUnlock string
 	//go:embed lua/refresh.lua
 	luaRefresh string
+	//go:embed lua/lock.lua
+	luaLock string
 )
 
 type Client struct {
-	r redis.Cmdable
+	r      redis.Cmdable
+	genVal func() string
 }
 
-func NewClient(r redis.Cmdable) *Client {
-	return &Client{r: r}
+func NewClient(r redis.Cmdable, ops ...ClientOption) *Client {
+	res := &Client{
+		r: r,
+		genVal: func() string {
+			return uuid.New().String()
+		},
+	}
+
+	for _, op := range ops {
+		op(res)
+	}
+	return res
 }
 
 func (c *Client) TryLock(ctx context.Context, key string, expiration time.Duration) (*Lock, error) {
-	uuid := uuid.New().String()
-	ok, err := c.r.SetNX(ctx, key, uuid, expiration).Result()
+	val := c.genVal()
+	ok, err := c.r.SetNX(ctx, key, val, expiration).Result()
 	if err != nil {
 		return nil, err
 	}
@@ -35,15 +48,63 @@ func (c *Client) TryLock(ctx context.Context, key string, expiration time.Durati
 	}
 
 	return &Lock{
-		client:     c,
+		rdb:        c.r,
 		key:        key,
-		val:        uuid,
+		val:        val,
 		expiration: expiration,
 	}, nil
 }
 
+func (c *Client) Lock(
+	ctx context.Context,
+	key string,
+	expiration time.Duration,
+	timeout time.Duration,
+	retry RetryStrategy) (*Lock, error) {
+
+	val := c.genVal()
+	var timer *time.Timer
+
+	for {
+		//尝试获取锁
+		lctx, cancel := context.WithTimeout(ctx, timeout)
+		res, err := c.r.Eval(lctx, luaLock, []string{key}, val, expiration.Seconds()).Result()
+		cancel()
+		if err != nil && !errors.Is(err, context.DeadlineExceeded) {
+			return nil, err
+		}
+		if res == "OK" {
+			return &Lock{
+				rdb:        c.r,
+				key:        key,
+				val:        val,
+				expiration: expiration,
+			}, nil
+		}
+
+		//如果获取失败，询问是否重试
+		interval, re := retry.Next()
+		if !re {
+			return nil, ErrFailedToGetLock
+		}
+		if timer == nil {
+			timer = time.NewTimer(interval)
+		} else {
+			timer.Reset(interval)
+		}
+
+		// 等待重试
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-timer.C:
+			continue
+		}
+	}
+}
+
 type Lock struct {
-	client     *Client
+	rdb        redis.Cmdable
 	key        string
 	val        string
 	expiration time.Duration
@@ -51,7 +112,7 @@ type Lock struct {
 }
 
 func (l *Lock) Unlock(ctx context.Context) error {
-	res, err := l.client.r.Eval(ctx, luaUnlock, []string{l.key}, l.val).Int64()
+	res, err := l.rdb.Eval(ctx, luaUnlock, []string{l.key}, l.val).Int64()
 	if errors.Is(err, redis.Nil) {
 		return ErrLockNotHold
 	}
@@ -66,7 +127,7 @@ func (l *Lock) Unlock(ctx context.Context) error {
 }
 
 func (l *Lock) Refresh(ctx context.Context) error {
-	res, err := l.client.r.Eval(ctx, luaRefresh, []string{l.key}, l.val, l.expiration.Seconds()).Int64()
+	res, err := l.rdb.Eval(ctx, luaRefresh, []string{l.key}, l.val, l.expiration.Seconds()).Int64()
 	if errors.Is(err, redis.Nil) {
 		return ErrLockNotHold
 	}
